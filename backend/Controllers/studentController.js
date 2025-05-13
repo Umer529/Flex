@@ -1,24 +1,31 @@
-const { getConnection, sql } = require("../config/db")
+const { getConnection, sql, executeStoredProcedure } = require("../config/db")
 
 // Get student courses
 exports.getCourses = async (req, res, next) => {
   try {
     const studentId = req.user.id
 
-    // Get database connection
+    // Get student ID from user ID
     const pool = await getConnection()
-
-    // Get courses for student
-    const result = await pool
+    const studentResult = await pool
       .request()
-      .input("studentId", sql.Int, studentId)
+      .input("userId", sql.Int, studentId)
       .query(`
-        SELECT c.id, c.name, c.code, c.description, 
-               e.progress, e.status
-        FROM Courses c
-        JOIN Enrollments e ON c.id = e.courseId
-        WHERE e.studentId = @studentId
+        SELECT student_id
+        FROM Students
+        WHERE user_id = @userId
       `)
+
+    if (studentResult.recordset.length === 0) {
+      return res.status(404).json({ message: "Student not found" })
+    }
+
+    const student_id = studentResult.recordset[0].student_id
+
+    // Use stored procedure to get student courses
+    const result = await executeStoredProcedure("GetStudentCourses", {
+      student_id: student_id
+    })
 
     res.status(200).json({
       courses: result.recordset,
@@ -33,23 +40,27 @@ exports.getGrades = async (req, res, next) => {
   try {
     const studentId = req.user.id
 
-    // Get database connection
+    // Get student ID from user ID
     const pool = await getConnection()
-
-    // Get grades for student
-    const result = await pool
+    const studentResult = await pool
       .request()
-      .input("studentId", sql.Int, studentId)
+      .input("userId", sql.Int, studentId)
       .query(`
-        SELECT g.id, g.grade, g.feedback, g.submittedAt,
-               a.title as assignmentTitle,
-               c.name as courseName, c.code as courseCode
-        FROM Grades g
-        JOIN Assignments a ON g.assignmentId = a.id
-        JOIN Courses c ON a.courseId = c.id
-        WHERE g.studentId = @studentId
-        ORDER BY g.submittedAt DESC
+        SELECT student_id
+        FROM Students
+        WHERE user_id = @userId
       `)
+
+    if (studentResult.recordset.length === 0) {
+      return res.status(404).json({ message: "Student not found" })
+    }
+
+    const student_id = studentResult.recordset[0].student_id
+
+    // Use stored procedure to get student grades
+    const result = await executeStoredProcedure("GetStudentGrades", {
+      student_id: student_id
+    })
 
     res.status(200).json({
       grades: result.recordset,
@@ -64,42 +75,44 @@ exports.getAttendance = async (req, res, next) => {
   try {
     const studentId = req.user.id
 
-    // Get database connection
+    // Get student ID from user ID
     const pool = await getConnection()
-
-    // Get attendance for student
-    const result = await pool
+    const studentResult = await pool
       .request()
-      .input("studentId", sql.Int, studentId)
+      .input("userId", sql.Int, studentId)
       .query(`
-        SELECT a.id, a.date, a.status,
-               c.name as courseName, c.code as courseCode
-        FROM Attendance a
-        JOIN Courses c ON a.courseId = c.id
-        WHERE a.studentId = @studentId
-        ORDER BY a.date DESC
+        SELECT student_id
+        FROM Students
+        WHERE user_id = @userId
       `)
+
+    if (studentResult.recordset.length === 0) {
+      return res.status(404).json({ message: "Student not found" })
+    }
+
+    const student_id = studentResult.recordset[0].student_id
+
+    // Use stored procedure to get student attendance
+    const result = await executeStoredProcedure("GetStudentAttendance", {
+      student_id: student_id
+    })
 
     // Calculate attendance statistics
     const totalClasses = result.recordset.length
     let present = 0
     let absent = 0
-    let excused = 0
 
     result.recordset.forEach((record) => {
       if (record.status === "present") present++
       else if (record.status === "absent") absent++
-      else if (record.status === "excused") excused++
     })
 
     const stats = {
       totalClasses,
       present,
       absent,
-      excused,
       presentPercentage: totalClasses > 0 ? (present / totalClasses) * 100 : 0,
       absentPercentage: totalClasses > 0 ? (absent / totalClasses) * 100 : 0,
-      excusedPercentage: totalClasses > 0 ? (excused / totalClasses) * 100 : 0,
     }
 
     res.status(200).json({
@@ -116,19 +129,10 @@ exports.getProfile = async (req, res, next) => {
   try {
     const studentId = req.user.id
 
-    // Get database connection
-    const pool = await getConnection()
-
-    // Get student profile
-    const result = await pool
-      .request()
-      .input("studentId", sql.Int, studentId)
-      .query(`
-        SELECT s.student_id as id, s.name, s.roll_number, s.email, s.phone_number, s.address
-        FROM Students s
-        JOIN Users u ON s.user_id = u.user_id
-        WHERE u.user_id = @studentId
-      `)
+    // Use stored procedure to get student profile
+    const result = await executeStoredProcedure("GetStudentProfile", {
+      user_id: studentId
+    })
 
     if (result.recordset.length === 0) {
       return res.status(404).json({ message: "Student profile not found" })
@@ -145,23 +149,8 @@ exports.getProfile = async (req, res, next) => {
 // Get notices
 exports.getNotices = async (req, res, next) => {
   try {
-    // Get database connection
-    const pool = await getConnection()
-
-    // Get notices
-    const result = await pool.request().query(`
-        SELECT n.notice_id as id, n.title, n.content, n.created_at,
-               CASE 
-                 WHEN u.role = 'teacher' THEN t.name
-                 WHEN u.role = 'management' THEN m.name
-                 ELSE u.domain_id
-               END as posted_by
-        FROM Notices n
-        JOIN Users u ON n.posted_by_user_id = u.user_id
-        LEFT JOIN Teachers t ON u.user_id = t.user_id
-        LEFT JOIN Management m ON u.user_id = m.user_id
-        ORDER BY n.created_at DESC
-      `)
+    // Use stored procedure to get all notices
+    const result = await executeStoredProcedure("GetAllNotices")
 
     res.status(200).json({
       notices: result.recordset,
@@ -176,10 +165,8 @@ exports.getFeeStatus = async (req, res, next) => {
   try {
     const studentId = req.user.id
 
-    // Get database connection
-    const pool = await getConnection()
-
     // Get student ID from user ID
+    const pool = await getConnection()
     const studentResult = await pool
       .request()
       .input("userId", sql.Int, studentId)
@@ -195,16 +182,10 @@ exports.getFeeStatus = async (req, res, next) => {
 
     const student_id = studentResult.recordset[0].student_id
 
-    // Get fee status
-    const result = await pool
-      .request()
-      .input("studentId", sql.Int, student_id)
-      .query(`
-        SELECT fee_id as id, amount, payment_status, payment_date
-        FROM Fees
-        WHERE student_id = @studentId
-        ORDER BY payment_date DESC
-      `)
+    // Use stored procedure to get student fee status
+    const result = await executeStoredProcedure("GetStudentFeeStatus", {
+      student_id: student_id
+    })
 
     // Calculate statistics
     let totalFees = 0
@@ -303,7 +284,6 @@ exports.payFee = async (req, res, next) => {
   }
 }
 
-
 // Enroll in a course
 exports.enrollInCourse = async (req, res, next) => {
   try {
@@ -350,17 +330,12 @@ exports.enrollInCourse = async (req, res, next) => {
       return res.status(400).json({ message: "You are already enrolled in this course" })
     }
 
-    // Enroll student in course
-    await pool
-      .request()
-      .input("studentId", sql.Int, student_id)
-      .input("courseId", sql.Int, courseId)
-      .input("enrollmentStatus", sql.VarChar, "active")
-      .input("createdAt", sql.DateTime, new Date())
-      .query(`
-        INSERT INTO Enrollments (student_id, course_id, enrollment_status, created_at)
-        VALUES (@studentId, @courseId, @enrollmentStatus, @createdAt)
-      `)
+    // Use stored procedure to enroll student in course
+    await executeStoredProcedure("EnrollStudentInCourse", {
+      student_id: student_id,
+      course_id: parseInt(courseId),
+      enrollment_status: "registered"
+    })
 
     res.status(201).json({
       message: "Successfully enrolled in course",
@@ -416,4 +391,3 @@ exports.getAvailableCourses = async (req, res, next) => {
     next(err)
   }
 }
-

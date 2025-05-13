@@ -1,7 +1,7 @@
 const bcrypt = require("bcryptjs")
 const jwt = require("jsonwebtoken")
-const { getConnection, sql } = require("../config/db")
-//const config = require("../config/config")
+const { getConnection, sql, executeStoredProcedure } = require("../config/db")
+const config = require("../config/config")
 
 // Register a new user
 exports.register = async (req, res, next) => {
@@ -40,8 +40,9 @@ exports.register = async (req, res, next) => {
       const salt = await bcrypt.genSalt(10)
       const hashedPassword = await bcrypt.hash(password, salt)
 
-      // Insert user
-      const userResult = await request
+      // Insert user using direct query
+      const userInsertRequest = new sql.Request(transaction)
+      const userResult = await userInsertRequest
         .input("domain_id", sql.VarChar, domain_id)
         .input("password_hash", sql.VarChar, hashedPassword)
         .input("role", sql.VarChar, userRole)
@@ -53,7 +54,7 @@ exports.register = async (req, res, next) => {
 
       const user_id = userResult.recordset[0].user_id
 
-      // Insert role-specific data
+      // Insert role-specific data using direct queries
       if (userRole === "student") {
         if (!roll_number) {
           await transaction.rollback()
@@ -131,42 +132,72 @@ exports.login = async (req, res, next) => {
       return res.status(400).json({ message: "Please provide domain_id and password" })
     }
 
+    console.log(`Login attempt for user: ${domain_id}`)
+
     // Get database connection
     const pool = await getConnection()
 
-    // Find user by domain_id
+    // Use direct query instead of stored procedure
     const result = await pool
       .request()
       .input("domain_id", sql.VarChar, domain_id)
       .query("SELECT * FROM Users WHERE domain_id = @domain_id")
 
     if (result.recordset.length === 0) {
+      console.log(`User not found: ${domain_id}`)
       return res.status(401).json({ message: "Invalid credentials" })
     }
-
+    
     const user = result.recordset[0]
+    console.log(`User found: ${user.domain_id}, role: ${user.role}`)
 
-    // Check password
-    const isMatch = await bcrypt.compare(password, user.password_hash)
+    // Direct password comparison for plain text passwords
+    if (password === user.password_hash) {
+      console.log("Password matched directly (plain text)")
+      
+      // Generate JWT token
+      const token = jwt.sign({ id: user.user_id, role: user.role }, config.JWT_SECRET, { expiresIn: config.JWT_EXPIRE })
 
-    if (!isMatch) {
-      return res.status(401).json({ message: "Invalid credentials" })
+      // Return user data and token
+      return res.status(200).json({
+        message: "Login successful",
+        user: {
+          id: user.user_id,
+          domain_id: user.domain_id,
+          role: user.role,
+        },
+        token,
+      })
     }
 
-    // Generate JWT token
-    const token = jwt.sign({ id: user.user_id, role: user.role }, config.JWT_SECRET, { expiresIn: config.JWT_EXPIRE })
+    // Try bcrypt compare as fallback
+    try {
+      const isMatch = await bcrypt.compare(password, user.password_hash)
+      if (isMatch) {
+        console.log("Password matched with bcrypt")
+        
+        // Generate JWT token
+        const token = jwt.sign({ id: user.user_id, role: user.role }, config.JWT_SECRET, { expiresIn: config.JWT_EXPIRE })
 
-    // Return user data and token
-    res.status(200).json({
-      message: "Login successful",
-      user: {
-        id: user.user_id,
-        domain_id: user.domain_id,
-        role: user.role,
-      },
-      token,
-    })
+        // Return user data and token
+        return res.status(200).json({
+          message: "Login successful",
+          user: {
+            id: user.user_id,
+            domain_id: user.domain_id,
+            role: user.role,
+          },
+          token,
+        })
+      }
+    } catch (err) {
+      console.log("Bcrypt compare failed:", err.message)
+    }
+
+    console.log("Password did not match")
+    return res.status(401).json({ message: "Invalid credentials" })
   } catch (err) {
+    console.error("Login error:", err)
     next(err)
   }
 }
@@ -238,8 +269,17 @@ exports.changePassword = async (req, res, next) => {
 
     const user = result.recordset[0]
 
-    // Check current password
-    const isMatch = await bcrypt.compare(currentPassword, user.password_hash)
+    // Check current password - handle plain text
+    let isMatch = false
+    if (currentPassword === user.password_hash) {
+      isMatch = true
+    } else {
+      try {
+        isMatch = await bcrypt.compare(currentPassword, user.password_hash)
+      } catch (err) {
+        isMatch = false
+      }
+    }
 
     if (!isMatch) {
       return res.status(401).json({ message: "Current password is incorrect" })
@@ -249,7 +289,7 @@ exports.changePassword = async (req, res, next) => {
     const salt = await bcrypt.genSalt(10)
     const hashedPassword = await bcrypt.hash(newPassword, salt)
 
-    // Update password
+    // Update password using direct query
     await pool
       .request()
       .input("id", sql.Int, userId)
