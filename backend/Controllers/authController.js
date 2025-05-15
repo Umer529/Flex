@@ -394,9 +394,9 @@ exports.resetPassword = async (req, res, next) => {
       .input("id", sql.Int, decoded.id)
       .input("password", sql.VarChar, hashedPassword)
       .query("UPDATE Users SET password_hash = @password WHERE user_id = @id")
-
+      
     res.status(200).json({
-      message: "Password reset successfully",
+      message: "Password reset successfully"
     })
   } catch (err) {
     next(err)

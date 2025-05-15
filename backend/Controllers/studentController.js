@@ -1,5 +1,39 @@
 const { getConnection, sql, executeStoredProcedure } = require("../config/db")
 
+// Get student profile
+exports.getProfile = async (req, res, next) => {
+  try {
+    const userId = req.user.id
+
+    // Get database connection
+    const pool = await getConnection()
+
+    // Get student profile data
+    const result = await pool
+      .request()
+      .input("userId", sql.Int, userId)
+      .query(`
+        SELECT s.student_id, s.name, s.roll_number, s.email, s.phone_number, s.address,
+               u.domain_id, u.role, u.created_at
+        FROM Students s
+        JOIN Users u ON s.user_id = u.user_id
+        WHERE s.user_id = @userId
+      `)
+
+    if (result.recordset.length === 0) {
+      return res.status(404).json({ message: "Student profile not found" })
+    }
+
+    // Return student profile data
+    res.status(200).json({
+      user: result.recordset[0]
+    })
+  } catch (err) {
+    console.error("Error in getProfile:", err)
+    next(err)
+  }
+}
+
 // Get student courses
 exports.getCourses = async (req, res, next) => {
   try {
@@ -97,49 +131,8 @@ exports.getAttendance = async (req, res, next) => {
       student_id: student_id
     })
 
-    // Calculate attendance statistics
-    const totalClasses = result.recordset.length
-    let present = 0
-    let absent = 0
-
-    result.recordset.forEach((record) => {
-      if (record.status === "present") present++
-      else if (record.status === "absent") absent++
-    })
-
-    const stats = {
-      totalClasses,
-      present,
-      absent,
-      presentPercentage: totalClasses > 0 ? (present / totalClasses) * 100 : 0,
-      absentPercentage: totalClasses > 0 ? (absent / totalClasses) * 100 : 0,
-    }
-
     res.status(200).json({
       attendance: result.recordset,
-      stats,
-    })
-  } catch (err) {
-    next(err)
-  }
-}
-
-// Get student profile
-exports.getProfile = async (req, res, next) => {
-  try {
-    const studentId = req.user.id
-
-    // Use stored procedure to get student profile
-    const result = await executeStoredProcedure("GetStudentProfile", {
-      user_id: studentId
-    })
-
-    if (result.recordset.length === 0) {
-      return res.status(404).json({ message: "Student profile not found" })
-    }
-
-    res.status(200).json({
-      profile: result.recordset[0],
     })
   } catch (err) {
     next(err)
@@ -187,34 +180,8 @@ exports.getFeeStatus = async (req, res, next) => {
       student_id: student_id
     })
 
-    // Calculate statistics
-    let totalFees = 0
-    let paidFees = 0
-    let pendingFees = 0
-    let unpaidFees = 0
-
-    result.recordset.forEach((fee) => {
-      totalFees += fee.amount
-      if (fee.payment_status === "paid") {
-        paidFees += fee.amount
-      } else if (fee.payment_status === "pending") {
-        pendingFees += fee.amount
-      } else if (fee.payment_status === "unpaid") {
-        unpaidFees += fee.amount
-      }
-    })
-
-    const stats = {
-      totalFees,
-      paidFees,
-      pendingFees,
-      unpaidFees,
-      paidPercentage: totalFees > 0 ? (paidFees / totalFees) * 100 : 0,
-    }
-
     res.status(200).json({
       fees: result.recordset,
-      stats,
     })
   } catch (err) {
     next(err)
@@ -224,48 +191,13 @@ exports.getFeeStatus = async (req, res, next) => {
 // Pay fee
 exports.payFee = async (req, res, next) => {
   try {
-    const studentId = req.user.id
     const { feeId } = req.params
+    const studentId = req.user.id
 
     // Get database connection
     const pool = await getConnection()
 
-    // Get student ID from user ID
-    const studentResult = await pool
-      .request()
-      .input("userId", sql.Int, studentId)
-      .query(`
-        SELECT student_id
-        FROM Students
-        WHERE user_id = @userId
-      `)
-
-    if (studentResult.recordset.length === 0) {
-      return res.status(404).json({ message: "Student not found" })
-    }
-
-    const student_id = studentResult.recordset[0].student_id
-
-    // Check if fee exists and belongs to student
-    const feeCheck = await pool
-      .request()
-      .input("feeId", sql.Int, feeId)
-      .input("studentId", sql.Int, student_id)
-      .query(`
-        SELECT * FROM Fees
-        WHERE fee_id = @feeId AND student_id = @studentId
-      `)
-
-    if (feeCheck.recordset.length === 0) {
-      return res.status(404).json({ message: "Fee not found or does not belong to student" })
-    }
-
-    // Check if fee is already paid
-    if (feeCheck.recordset[0].payment_status === "paid") {
-      return res.status(400).json({ message: "Fee is already paid" })
-    }
-
-    // Update fee status
+    // Update fee status to paid
     await pool
       .request()
       .input("feeId", sql.Int, feeId)
@@ -284,16 +216,14 @@ exports.payFee = async (req, res, next) => {
   }
 }
 
-// Enroll in a course
+// Enroll in course
 exports.enrollInCourse = async (req, res, next) => {
   try {
     const { courseId } = req.params
     const studentId = req.user.id
 
-    // Get database connection
-    const pool = await getConnection()
-
     // Get student ID from user ID
+    const pool = await getConnection()
     const studentResult = await pool
       .request()
       .input("userId", sql.Int, studentId)
@@ -309,25 +239,18 @@ exports.enrollInCourse = async (req, res, next) => {
 
     const student_id = studentResult.recordset[0].student_id
 
-    // Check if course exists
-    const courseCheck = await pool
-      .request()
-      .input("courseId", sql.Int, courseId)
-      .query("SELECT * FROM Courses WHERE course_id = @courseId")
-
-    if (courseCheck.recordset.length === 0) {
-      return res.status(404).json({ message: "Course not found" })
-    }
-
-    // Check if student is already enrolled
+    // Check if already enrolled
     const enrollmentCheck = await pool
       .request()
       .input("studentId", sql.Int, student_id)
       .input("courseId", sql.Int, courseId)
-      .query("SELECT * FROM Enrollments WHERE student_id = @studentId AND course_id = @courseId")
+      .query(`
+        SELECT * FROM Enrollments
+        WHERE student_id = @studentId AND course_id = @courseId
+      `)
 
     if (enrollmentCheck.recordset.length > 0) {
-      return res.status(400).json({ message: "You are already enrolled in this course" })
+      return res.status(400).json({ message: "Already enrolled in this course" })
     }
 
     // Use stored procedure to enroll student in course
@@ -338,22 +261,20 @@ exports.enrollInCourse = async (req, res, next) => {
     })
 
     res.status(201).json({
-      message: "Successfully enrolled in course",
+      message: "Enrolled successfully",
     })
   } catch (err) {
     next(err)
   }
 }
 
-// Get available courses for enrollment
+// Get available courses
 exports.getAvailableCourses = async (req, res, next) => {
   try {
     const studentId = req.user.id
 
-    // Get database connection
-    const pool = await getConnection()
-
     // Get student ID from user ID
+    const pool = await getConnection()
     const studentResult = await pool
       .request()
       .input("userId", sql.Int, studentId)
@@ -369,25 +290,56 @@ exports.getAvailableCourses = async (req, res, next) => {
 
     const student_id = studentResult.recordset[0].student_id
 
-    // Get courses that student is not enrolled in
+    // Get courses not enrolled in
     const result = await pool
       .request()
       .input("studentId", sql.Int, student_id)
       .query(`
         SELECT c.course_id as id, c.course_code as code, c.course_name as name, 
-               c.schedule, t.name as teacherName
+               c.schedule, t.name as teacher_name
         FROM Courses c
         LEFT JOIN Teachers t ON c.teacher_id = t.teacher_id
         WHERE c.course_id NOT IN (
           SELECT course_id FROM Enrollments WHERE student_id = @studentId
         )
-        ORDER BY c.course_code
       `)
 
     res.status(200).json({
-      availableCourses: result.recordset,
+      courses: result.recordset,
     })
   } catch (err) {
+    next(err)
+  }
+}
+
+// Update student profile
+exports.updateProfile = async (req, res, next) => {
+  try {
+    const userId = req.user.id
+    const { name, email, phone_number, address } = req.body
+
+    // Get database connection
+    const pool = await getConnection()
+
+    // Update student profile
+    await pool
+      .request()
+      .input("userId", sql.Int, userId)
+      .input("name", sql.VarChar, name)
+      .input("email", sql.VarChar, email)
+      .input("phone_number", sql.VarChar, phone_number || null)
+      .input("address", sql.Text, address || null)
+      .query(`
+        UPDATE Students
+        SET name = @name, email = @email, phone_number = @phone_number, address = @address
+        WHERE user_id = @userId
+      `)
+
+    res.status(200).json({
+      message: "Profile updated successfully"
+    })
+  } catch (err) {
+    console.error("Error in updateProfile:", err)
     next(err)
   }
 }

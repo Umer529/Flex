@@ -1,6 +1,8 @@
 const express = require("express")
 const router = express.Router()
 const {
+  getProfile,
+  updateProfile,
   getUsers,
   createUser,
   updateUser,
@@ -12,7 +14,8 @@ const {
   generateReports,
   manageFees,
   postNotice,
-  systemConfig,
+  getNotices,
+  getDepartments
 } = require("../Controllers/managementController")
 const { protect } = require("../middleware/authMiddleware")
 const { authorize } = require("../middleware/roleCheck")
@@ -20,6 +23,13 @@ const { authorize } = require("../middleware/roleCheck")
 // All routes are protected and require management role
 router.use(protect)
 router.use(authorize("management"))
+
+// Dashboard route
+router.get("/dashboard", generateReports)
+
+// Profile routes
+router.get("/profile", getProfile)
+router.put("/profile", updateProfile)
 
 // User management routes
 router.get("/users", getUsers)
@@ -38,11 +48,13 @@ router.get("/reports/:reportType", generateReports)
 
 // Fee management routes
 router.post("/fees/:action", manageFees)
+router.get("/fees/:action", manageFees)
 
 // Notice board routes
 router.post("/notices", postNotice)
+router.get("/notices", getNotices)
 
-// System configuration routes
-router.post("/system-config", systemConfig)
+// Department routes
+router.get("/departments", getDepartments)
 
 module.exports = router

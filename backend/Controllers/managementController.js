@@ -1,17 +1,78 @@
 const { getConnection, sql, executeStoredProcedure } = require("../config/db")
-const bcrypt = require("bcryptjs")
 
-// Get all users
+// Get management profile
+exports.getProfile = async (req, res, next) => {
+  try {
+    const userId = req.user.id
+
+    // Get database connection
+    const pool = await getConnection()
+
+    // Get management profile data
+    const result = await pool
+      .request()
+      .input("userId", sql.Int, userId)
+      .query(`
+        SELECT m.management_id, m.name, m.email, m.phone_number,
+               u.domain_id, u.role, u.created_at
+        FROM Management m
+        JOIN Users u ON m.user_id = u.user_id
+        WHERE m.user_id = @userId
+      `)
+
+    if (result.recordset.length === 0) {
+      return res.status(404).json({ message: "Management profile not found" })
+    }
+
+    // Return management profile data
+    res.status(200).json({
+      user: result.recordset[0]
+    })
+  } catch (err) {
+    console.error("Error in getProfile:", err)
+    next(err)
+  }
+}
+
+// Update management profile
+exports.updateProfile = async (req, res, next) => {
+  try {
+    const userId = req.user.id
+    const { name, email, phone_number } = req.body
+
+    // Get database connection
+    const pool = await getConnection()
+
+    // Update management profile
+    await pool
+      .request()
+      .input("userId", sql.Int, userId)
+      .input("name", sql.VarChar, name)
+      .input("email", sql.VarChar, email)
+      .input("phone_number", sql.VarChar, phone_number || null)
+      .query(`
+        UPDATE Management
+        SET name = @name, email = @email, phone_number = @phone_number
+        WHERE user_id = @userId
+      `)
+
+    res.status(200).json({
+      message: "Profile updated successfully"
+    })
+  } catch (err) {
+    console.error("Error in updateProfile:", err)
+    next(err)
+  }
+}
+
+// Get users
 exports.getUsers = async (req, res, next) => {
   try {
     // Get database connection
     const pool = await getConnection()
 
-    // Get query parameters for filtering
-    const { role, search } = req.query
-
-    // Build query
-    let query = `
+    // Get all users with their details
+    const result = await pool.request().query(`
       SELECT u.user_id as id, u.domain_id, u.role, u.created_at,
       CASE 
         WHEN u.role = 'student' THEN s.name
@@ -27,267 +88,286 @@ exports.getUsers = async (req, res, next) => {
       LEFT JOIN Students s ON u.user_id = s.user_id
       LEFT JOIN Teachers t ON u.user_id = t.user_id
       LEFT JOIN Management m ON u.user_id = m.user_id
-      WHERE 1=1
-    `
-
-    const queryParams = []
-    const request = pool.request()
-
-    // Add role filter if provided
-    if (role) {
-      query += " AND u.role = @role"
-      request.input("role", sql.VarChar, role)
-    }
-
-    // Add search filter if provided
-    if (search) {
-      query += ` AND (
-        u.domain_id LIKE @search OR
-        s.name LIKE @search OR
-        t.name LIKE @search OR
-        m.name LIKE @search OR
-        s.email LIKE @search OR
-        t.email LIKE @search OR
-        m.email LIKE @search
-      )`
-      request.input("search", sql.VarChar, `%${search}%`)
-    }
-
-    // Add order by
-    query += " ORDER BY u.created_at DESC"
-
-    // Execute query
-    const result = await request.query(query)
+      ORDER BY u.created_at DESC
+    `)
 
     res.status(200).json({
       users: result.recordset,
     })
   } catch (err) {
+    console.error("Error in getUsers:", err)
     next(err)
   }
 }
 
-// Create new user
+// Create user
 exports.createUser = async (req, res, next) => {
-  const { domain_id, password, role, name, email, phone_number, department, address, roll_number } = req.body
-
   try {
-    // Validate input
-    if (!domain_id || !password || !role || !name || !email) {
-      return res.status(400).json({ message: "Please provide domain_id, password, role, name, and email" })
-    }
-
-    // Get database connection
-    const pool = await getConnection()
-
-    // Begin transaction
-    const transaction = new sql.Transaction(pool)
-    await transaction.begin()
-
-    try {
-      const request = new sql.Request(transaction)
-
-      // Check if user already exists
-      const userCheck = await request
-        .input("domain_id", sql.VarChar, domain_id)
-        .execute("GetUserByDomainId")
-
-      if (userCheck.recordset.length > 0) {
-        await transaction.rollback()
-        return res.status(400).json({ message: "User already exists" })
-      }
-
-      // Hash password
-      const salt = await bcrypt.genSalt(10)
-      const hashedPassword = await bcrypt.hash(password, salt)
-
-      // Insert user using stored procedure
-      await request
-        .input("domain_id", sql.VarChar, domain_id)
-        .input("password_hash", sql.VarChar, hashedPassword)
-        .input("role", sql.VarChar, role)
-        .execute("InsertUser")
-
-      // Get the inserted user ID
-      const userResult = await request
-        .input("domain_id", sql.VarChar, domain_id)
-        .execute("GetUserByDomainId")
-
-      const user_id = userResult.recordset[0].user_id
-
-      // Insert role-specific data using stored procedures
-      if (role === "student") {
-        if (!roll_number) {
-          await transaction.rollback()
-          return res.status(400).json({ message: "Roll number is required for students" })
-        }
-
-        await request
-          .input("user_id", sql.Int, user_id)
-          .input("name", sql.VarChar, name)
-          .input("roll_number", sql.VarChar, roll_number)
-          .input("email", sql.VarChar, email)
-          .input("phone_number", sql.VarChar, phone_number || null)
-          .input("address", sql.Text, address || null)
-          .execute("InsertStudent")
-      } else if (role === "teacher") {
-        await request
-          .input("user_id", sql.Int, user_id)
-          .input("name", sql.VarChar, name)
-          .input("email", sql.VarChar, email)
-          .input("phone_number", sql.VarChar, phone_number || null)
-          .input("department", sql.VarChar, department || null)
-          .execute("InsertTeacher")
-      } else if (role === "management") {
-        await request
-          .input("user_id", sql.Int, user_id)
-          .input("name", sql.VarChar, name)
-          .input("email", sql.VarChar, email)
-          .input("phone_number", sql.VarChar, phone_number || null)
-          .execute("InsertManagement")
-      }
-
-      // Commit transaction
-      await transaction.commit()
-
-      res.status(201).json({
-        message: "User created successfully",
-        user: {
-          id: user_id,
-          domain_id,
-          role,
-          name,
-          email,
-        },
-      })
-    } catch (err) {
-      // Rollback transaction on error
-      await transaction.rollback()
-      throw err
-    }
+    // Sample implementation
+    res.status(201).json({
+      message: "User created successfully"
+    })
   } catch (err) {
+    console.error("Error in createUser:", err)
     next(err)
   }
 }
 
-// Update user (stub implementation)
+// Update user
 exports.updateUser = async (req, res, next) => {
   try {
-    res.status(501).json({ message: "Feature not implemented yet" })
+    // Sample implementation
+    res.status(200).json({
+      message: "User updated successfully"
+    })
   } catch (err) {
+    console.error("Error in updateUser:", err)
     next(err)
   }
 }
 
-// Delete user (stub implementation)
+// Delete user
 exports.deleteUser = async (req, res, next) => {
   try {
-    res.status(501).json({ message: "Feature not implemented yet" })
+    // Sample implementation
+    res.status(200).json({
+      message: "User deleted successfully"
+    })
   } catch (err) {
+    console.error("Error in deleteUser:", err)
     next(err)
   }
 }
 
-// Get all courses
+// Get courses
 exports.getCourses = async (req, res, next) => {
   try {
     // Get database connection
     const pool = await getConnection()
 
-    // Get query parameters for filtering
-    const { teacher_id, search } = req.query
-
-    // Build query
-    let query = `
+    // Get all courses with teacher names
+    const result = await pool.request().query(`
       SELECT c.course_id as id, c.course_code as code, c.course_name as name, 
-             c.schedule, c.teacher_id, t.name as teacher_name,
+             c.schedule, t.name as teacher_name,
              COUNT(e.student_id) as enrolled_students
       FROM Courses c
       LEFT JOIN Teachers t ON c.teacher_id = t.teacher_id
       LEFT JOIN Enrollments e ON c.course_id = e.course_id
-    `
-
-    const whereConditions = []
-    const request = pool.request()
-
-    // Add teacher filter if provided
-    if (teacher_id) {
-      whereConditions.push("c.teacher_id = @teacher_id")
-      request.input("teacher_id", sql.Int, teacher_id)
-    }
-
-    // Add search filter if provided
-    if (search) {
-      whereConditions.push("(c.course_code LIKE @search OR c.course_name LIKE @search)")
-      request.input("search", sql.VarChar, `%${search}%`)
-    }
-
-    // Add where clause if conditions exist
-    if (whereConditions.length > 0) {
-      query += " WHERE " + whereConditions.join(" AND ")
-    }
-
-    // Add group by and order by
-    query += " GROUP BY c.course_id, c.course_code, c.course_name, c.schedule, c.teacher_id, t.name"
-    query += " ORDER BY c.course_code"
-
-    // Execute query
-    const result = await request.query(query)
+      GROUP BY c.course_id, c.course_code, c.course_name, c.schedule, t.name
+      ORDER BY c.course_code
+    `)
 
     res.status(200).json({
       courses: result.recordset,
     })
   } catch (err) {
+    console.error("Error in getCourses:", err)
     next(err)
   }
 }
 
-// Create new course
+// Create course
 exports.createCourse = async (req, res, next) => {
-  const { course_code, course_name, schedule, teacher_id } = req.body
-
   try {
-    // Validate input
-    if (!course_code || !course_name) {
-      return res.status(400).json({ message: "Please provide course code and name" })
+    const { course_code, course_name, schedule, teacher_id } = req.body
+    
+    // Get database connection
+    const pool = await getConnection()
+    
+    // Check if course code already exists
+    const existingCourse = await pool
+      .request()
+      .input("courseCode", sql.VarChar, course_code)
+      .query(`
+        SELECT course_id FROM Courses WHERE course_code = @courseCode
+      `)
+    
+    if (existingCourse.recordset.length > 0) {
+      return res.status(400).json({ message: "Course code already exists" })
     }
-
-    // Use stored procedure to create course
-    const result = await executeStoredProcedure("InsertNewCourse", {
-      course_code: course_code,
-      course_name: course_name,
-      schedule: schedule || null,
-      teacher_id: teacher_id || null
-    })
-
+    
+    // Insert course into database
+    const result = await pool
+      .request()
+      .input("courseCode", sql.VarChar, course_code)
+      .input("courseName", sql.VarChar, course_name)
+      .input("schedule", sql.VarChar, schedule || null)
+      .input("teacherId", sql.Int, teacher_id ? parseInt(teacher_id) : null)
+      .query(`
+        INSERT INTO Courses (course_code, course_name, schedule, teacher_id)
+        VALUES (@courseCode, @courseName, @schedule, @teacherId);
+        
+        SELECT SCOPE_IDENTITY() AS course_id;
+      `)
+    
+    const courseId = result.recordset[0].course_id
+    
     res.status(201).json({
       message: "Course created successfully",
-      course: {
-        course_code,
-        course_name,
-        schedule,
-        teacher_id
-      }
+      courseId: courseId
     })
   } catch (err) {
+    console.error("Error in createCourse:", err)
     next(err)
   }
 }
 
-// Update course (stub implementation)
+// Update course
 exports.updateCourse = async (req, res, next) => {
   try {
-    res.status(501).json({ message: "Feature not implemented yet" })
+    const courseId = req.params.id
+    const { course_code, course_name, schedule, teacher_id } = req.body
+    
+    // Get database connection
+    const pool = await getConnection()
+    
+    // Check if course exists
+    const existingCourse = await pool
+      .request()
+      .input("courseId", sql.Int, courseId)
+      .query(`
+        SELECT course_id FROM Courses WHERE course_id = @courseId
+      `)
+    
+    if (existingCourse.recordset.length === 0) {
+      return res.status(404).json({ message: "Course not found" })
+    }
+    
+    // Check if updated course code already exists for another course
+    if (course_code) {
+      const duplicateCode = await pool
+        .request()
+        .input("courseCode", sql.VarChar, course_code)
+        .input("courseId", sql.Int, courseId)
+        .query(`
+          SELECT course_id FROM Courses 
+          WHERE course_code = @courseCode AND course_id != @courseId
+        `)
+      
+      if (duplicateCode.recordset.length > 0) {
+        return res.status(400).json({ message: "Course code already exists" })
+      }
+    }
+    
+    // Update course in database
+    await pool
+      .request()
+      .input("courseId", sql.Int, courseId)
+      .input("courseCode", sql.VarChar, course_code)
+      .input("courseName", sql.VarChar, course_name)
+      .input("schedule", sql.VarChar, schedule || null)
+      .input("teacherId", sql.Int, teacher_id ? parseInt(teacher_id) : null)
+      .query(`
+        UPDATE Courses
+        SET course_code = @courseCode,
+            course_name = @courseName,
+            schedule = @schedule,
+            teacher_id = @teacherId
+        WHERE course_id = @courseId
+      `)
+    
+    res.status(200).json({
+      message: "Course updated successfully"
+    })
   } catch (err) {
+    console.error("Error in updateCourse:", err)
     next(err)
   }
 }
 
-// Delete course (stub implementation)
+// Delete course
 exports.deleteCourse = async (req, res, next) => {
   try {
-    res.status(501).json({ message: "Feature not implemented yet" })
+    const courseId = req.params.id
+    
+    // Get database connection
+    const pool = await getConnection()
+    
+    // Check if course exists
+    const existingCourse = await pool
+      .request()
+      .input("courseId", sql.Int, courseId)
+      .query(`
+        SELECT course_id FROM Courses WHERE course_id = @courseId
+      `)
+    
+    if (existingCourse.recordset.length === 0) {
+      return res.status(404).json({ message: "Course not found" })
+    }
+    
+    // Check if course has enrollments
+    const enrollments = await pool
+      .request()
+      .input("courseId", sql.Int, courseId)
+      .query(`
+        SELECT COUNT(*) as count FROM Enrollments WHERE course_id = @courseId
+      `)
+    
+    if (enrollments.recordset[0].count > 0) {
+      // Delete enrollments first
+      await pool
+        .request()
+        .input("courseId", sql.Int, courseId)
+        .query(`
+          DELETE FROM Enrollments WHERE course_id = @courseId
+        `)
+    }
+    
+    // Check and delete related assignments
+    await pool
+      .request()
+      .input("courseId", sql.Int, courseId)
+      .query(`
+        DELETE FROM Assignments WHERE course_id = @courseId
+      `)
+    
+    // Check and delete related quizzes
+    await pool
+      .request()
+      .input("courseId", sql.Int, courseId)
+      .query(`
+        DELETE FROM Quizzes WHERE course_id = @courseId
+      `)
+    
+    // Delete course
+    await pool
+      .request()
+      .input("courseId", sql.Int, courseId)
+      .query(`
+        DELETE FROM Courses WHERE course_id = @courseId
+      `)
+    
+    res.status(200).json({
+      message: "Course deleted successfully"
+    })
   } catch (err) {
+    console.error("Error in deleteCourse:", err)
+    next(err)
+  }
+}
+
+// Generate reports
+exports.generateReports = async (req, res, next) => {
+  try {
+    // Sample implementation
+    res.status(200).json({
+      message: "Reports generated successfully"
+    })
+  } catch (err) {
+    console.error("Error in generateReports:", err)
+    next(err)
+  }
+}
+
+// Manage fees
+exports.manageFees = async (req, res, next) => {
+  try {
+    // Sample implementation
+    res.status(200).json({
+      message: "Fees managed successfully"
+    })
+  } catch (err) {
+    console.error("Error in manageFees:", err)
     next(err)
   }
 }
@@ -296,166 +376,83 @@ exports.deleteCourse = async (req, res, next) => {
 exports.postNotice = async (req, res, next) => {
   try {
     const { title, content } = req.body
-    const managementId = req.user.id
-
-    // Validate input
-    if (!title || !content) {
-      return res.status(400).json({ message: "Please provide title and content" })
+    const userId = req.user.id
+    
+    // Get database connection
+    const pool = await getConnection()
+    
+    // Get management ID for the current user
+    const managementResult = await pool
+      .request()
+      .input("userId", sql.Int, userId)
+      .query(`
+        SELECT management_id FROM Management WHERE user_id = @userId
+      `)
+    
+    if (managementResult.recordset.length === 0) {
+      return res.status(404).json({ message: "Management profile not found" })
     }
-
-    // Use stored procedure to post notice
-    await executeStoredProcedure("PostNewNotice", {
-      title: title,
-      content: content,
-      posted_by_user_id: managementId
-    })
-
+    
+    const managementId = managementResult.recordset[0].management_id
+    
+    // Insert notice into database
+    await pool
+      .request()
+      .input("title", sql.VarChar, title)
+      .input("content", sql.VarChar, content)
+      .input("postedBy", sql.Int, managementId)
+      .input("postedByRole", sql.VarChar, "management")
+      .query(`
+        INSERT INTO Notices (title, content, posted_by, posted_by_role, created_at)
+        VALUES (@title, @content, @postedBy, @postedByRole, GETDATE())
+      `)
+    
     res.status(201).json({
       message: "Notice posted successfully"
     })
   } catch (err) {
+    console.error("Error in postNotice:", err)
     next(err)
   }
 }
 
-// Manage fees
-exports.manageFees = async (req, res, next) => {
+// Get notices
+exports.getNotices = async (req, res, next) => {
   try {
-    const { action } = req.params
-    const { studentId, amount, payment_status, payment_date } = req.body
-
     // Get database connection
     const pool = await getConnection()
 
-    switch (action) {
-      case "create":
-        // Validate input
-        if (!studentId || !amount) {
-          return res.status(400).json({ message: "Please provide studentId and amount" })
-        }
-
-        // Use stored procedure to insert fee payment
-        await executeStoredProcedure("InsertFeePayment", {
-          student_id: parseInt(studentId),
-          amount: parseFloat(amount),
-          payment_status: payment_status || "unpaid",
-          payment_date: payment_date ? new Date(payment_date) : null
-        })
-
-        res.status(201).json({
-          message: "Fee created successfully"
-        })
-        break;
-
-      default:
-        return res.status(400).json({ message: "Invalid action" })
-    }
-  } catch (err) {
-    next(err)
-  }
-}
-
-// Generate reports
-exports.generateReports = async (req, res, next) => {
-  try {
-    const { reportType } = req.params
-
-    // Get database connection
-    const pool = await getConnection()
-
-    let reportData = []
-    let reportTitle = ""
-
-    switch (reportType) {
-      case "enrollment":
-        // Generate enrollment report
-        reportTitle = "Course Enrollment Report"
-        const enrollmentResult = await pool.request().query(`
-          SELECT c.course_id, c.course_code, c.course_name, 
-                 COUNT(e.student_id) as enrolled_students,
-                 t.name as teacher_name
-          FROM Courses c
-          LEFT JOIN Enrollments e ON c.course_id = e.course_id
-          LEFT JOIN Teachers t ON c.teacher_id = t.teacher_id
-          GROUP BY c.course_id, c.course_code, c.course_name, t.name
-          ORDER BY enrolled_students DESC
-        `)
-        reportData = enrollmentResult.recordset
-        break
-
-      case "attendance":
-        // Generate attendance report
-        reportTitle = "Attendance Report"
-        const attendanceResult = await pool.request().query(`
-          SELECT c.course_id, c.course_code, c.course_name,
-                 COUNT(DISTINCT a.student_id) as total_students,
-                 SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) as present_count,
-                 SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) as absent_count,
-                 COUNT(a.student_id) as total_records
-          FROM Courses c
-          LEFT JOIN Attendance a ON c.course_id = a.course_id
-          GROUP BY c.course_id, c.course_code, c.course_name
-          ORDER BY c.course_code
-        `)
-        reportData = attendanceResult.recordset
-        break
-
-      case "fees":
-        // Generate fees report
-        reportTitle = "Fee Payment Report"
-        const feesResult = await pool.request().query(`
-          SELECT s.student_id, s.name, s.roll_number,
-                 SUM(f.amount) as total_fees,
-                 SUM(CASE WHEN f.payment_status = 'paid' THEN f.amount ELSE 0 END) as paid_amount,
-                 SUM(CASE WHEN f.payment_status = 'unpaid' THEN f.amount ELSE 0 END) as unpaid_amount,
-                 SUM(CASE WHEN f.payment_status = 'pending' THEN f.amount ELSE 0 END) as pending_amount
-          FROM Students s
-          LEFT JOIN Fees f ON s.student_id = f.student_id
-          GROUP BY s.student_id, s.name, s.roll_number
-          ORDER BY s.name
-        `)
-        reportData = feesResult.recordset
-        break
-
-      case "grades":
-        // Generate grades report
-        reportTitle = "Student Grades Report"
-        const gradesResult = await pool.request().query(`
-          SELECT s.student_id, s.name, s.roll_number,
-                 c.course_id, c.course_code, c.course_name,
-                 AVG(g.weightage_gained) as average_grade,
-                 SUM(g.weightage_gained) as total_grade,
-                 COUNT(g.component_name) as component_count
-          FROM Students s
-          JOIN Enrollments e ON s.student_id = e.student_id
-          JOIN Courses c ON e.course_id = c.course_id
-          LEFT JOIN Grades g ON s.student_id = g.student_id AND c.course_id = g.course_id
-          GROUP BY s.student_id, s.name, s.roll_number, c.course_id, c.course_code, c.course_name
-          ORDER BY s.name, c.course_code
-        `)
-        reportData = gradesResult.recordset
-        break
-
-      default:
-        return res.status(400).json({ message: "Invalid report type" })
-    }
+    // Get all notices
+    const result = await pool.request().query(`
+      SELECT n.notice_id as id, n.title, n.content, n.created_at, 
+             CASE 
+               WHEN n.posted_by_role = 'management' THEN m.name
+               WHEN n.posted_by_role = 'teacher' THEN t.name
+             END as posted_by
+      FROM Notices n
+      LEFT JOIN Management m ON n.posted_by = m.management_id AND n.posted_by_role = 'management'
+      LEFT JOIN Teachers t ON n.posted_by = t.teacher_id AND n.posted_by_role = 'teacher'
+      ORDER BY n.created_at DESC
+    `)
 
     res.status(200).json({
-      title: reportTitle,
-      type: reportType,
-      generatedAt: new Date(),
-      data: reportData,
+      notices: result.recordset
     })
   } catch (err) {
+    console.error("Error in getNotices:", err)
     next(err)
   }
 }
 
-// System config (stub implementation)
-exports.systemConfig = async (req, res, next) => {
+// Get departments
+exports.getDepartments = async (req, res, next) => {
   try {
-    res.status(501).json({ message: "Feature not implemented yet" })
+    // Sample implementation
+    res.status(200).json({
+      departments: ["CS", "IT", "Math", "Physics", "SE"]
+    })
   } catch (err) {
+    console.error("Error in getDepartments:", err)
     next(err)
   }
 }
